@@ -9,43 +9,13 @@
 #include <sstream>
 #include <stdio.h>
 #include <bits/stdc++.h> 
+#include <geometry_msgs/QuaternionStamped.h>
+#include <geometry_msgs/TwistStamped.h>
+#include <sensor_msgs/NavSatFix.h>
 
-/*
-// below define is for encoding gpsdata (e.g int -> 32-hex data)
-#define BYTE_TO_BIN(b)   (( b & 0x80 ) ) |\
-            (( b & 0x40 ) ) |\
-            (( b & 0x20 ) ) |\
-            (( b & 0x10 ) ) |\
-            (( b & 0x08 ) ) |\
-            (( b & 0x04 ) ) |\
-            (( b & 0x02 ) ) |\
-            ( b & 0x01 )
 
-#define MANTISSA_TO_BIN(b)  (( b & 0x400000 ) ) |\
-             (( b & 0x200000 ) ) strToBinary(sss);|\
-             (( b &  0x40000 ) ) |\
-             (( b &  0x20000 ) ) |\
-             (( b &  0x10000 ) ) |\
-             (( b &  0x8000 ) ) |\
-             (( b &  0x4000 ) ) |\
-             (( b &  0x2000 ) ) |\
-             (( b &  0x1000 ) ) |\
-             (( b &  0x800 ) ) |\
-             (( b &  0x400 ) ) |\
-             (( b &  0x200 ) ) |\
-             (( b &  0x100 ) ) |\
-             (( b &  0x80 ) ) |\
-             (( b &  0x40 ) ) |\
-             (( b &  0x20 ) ) |\
-             (( b &  0x10 ) ) |\
-             (( b &  0x08 ) ) |\
-             (( b &  0x04 ) ) |\
-             (( b &  0x02 ) ) |\
-              ( b & 0x01 )
-*/
 
 #define NTH_BIT(b, n) ((b >> n) & 0x1)
-
 //for IEEE754 32bit convert
 typedef union UnFloatingPointIEEE754
 {
@@ -118,7 +88,6 @@ double ieee754decoding_64(unsigned char* str_data_arr, int i)
         sprintf((char*)(output_64 + 2*j),"%02X", input[j]);
     }
     output_64[17] = '\0';
-    std::cout << "q: "<< output_64 << std::endl;
     uint64_t n; 
     std::string hex_str(output_64);
     std::stringstream ss;
@@ -143,52 +112,31 @@ double ieee754decoding_64(unsigned char* str_data_arr, int i)
     return ieee754double.d; 
 }
 
-void gpsdecoding (unsigned char* str_data_arr, float& roll, float& pitch, float& yaw, float& vel_n, float& vel_e, float& vel_d, double& latitude, double& longitude, double& altitude )
+uint16_t checkcrc(unsigned char* pBuffer, int bufferSize)
 {
-    //data type 06
-    if ((int)str_data_arr[2] == 6)
-    {
-        roll = ieee754decoding_32(str_data_arr, 13) * 180 / 3.141592;
-        pitch = ieee754decoding_32(str_data_arr, 17) * 180 / 3.141592;
-        yaw = ieee754decoding_32(str_data_arr, 21) * 180 / 3.141592;
-       
-    }
-
-    //data type 08
-    if ((int)str_data_arr[2] == 8)
-    {
-        vel_n = ieee754decoding_32(str_data_arr, 13);
-        vel_e = ieee754decoding_32(str_data_arr, 17);
-        vel_d = ieee754decoding_32(str_data_arr, 21);
-        latitude = ieee754decoding_64(str_data_arr, 41);
-        longitude = ieee754decoding_64(str_data_arr, 49);
-        altitude = ieee754decoding_64(str_data_arr, 57);
-    }
-}
-
-uint16_t checkcrc(unsigned char *pBuffer, uint16_t bufferSize)
-{
-    const uint8_t *pArray = (unsigned uint8_t*)pBuffer;
+    const uint8_t *pArray = (const uint8_t *)pBuffer;
     uint16_t poly = 0x8408;
     uint16_t crc16 = 0;
     uint8_t carry;
     uint8_t i;
     uint16_t j;
-    for (j=0; j<bufferSize; j++)
+    for (j=2; j<bufferSize-3; j++)
     {
-        crc16 = crc16 ^ pArray[j];
+        crc16 = (crc16 ^ pBuffer[j]);
         for(i=0; i<8;i++)
         {
             carry = crc16 & 1;
-            crc16 = crc16/2;
+            crc16 = crc16 / 2;
             if(carry)
             {
-                crc16 = crc16 ^ poly;
+                crc16 = (crc16 ^ poly);
             }
         }
     }
 
     unsigned char input[2] ={pBuffer[bufferSize-2],pBuffer[bufferSize-3]};
+    //unsigned char input[2] ={0xfb, 0x7b};
+  
     char crc[5];
     //char[ string shape ] -> char[ hex shape ]
     for (int j=0; j<2; j++)
@@ -197,44 +145,80 @@ uint16_t checkcrc(unsigned char *pBuffer, uint16_t bufferSize)
     }
     //insert NULL at the end of the output string
     crc[5] = '\0';
-
-    uint16_t n;
+    uint32_t n;
     // char [ hex shape ] -> string (hex shape) 
     std::string hex_str(crc);
     std::stringstream ss;
     ss << hex_str;
     // string (hex shape) -> int (hex shape)
     ss >> std::hex >> n;
-    std::cout << crc16 << std::endl;
+
     if (crc16 == n)
         return 1;
     else return 0;
    
 }
-serial::Serial ser;
 
-void write_callback(const std_msgs::String::ConstPtr& msg){
-    ROS_INFO_STREAM("Writing to serial port" << msg->data);
-    ser.write(msg->data);
+void gpsdecoding (unsigned char* str_data_arr, int str_len, geometry_msgs::QuaternionStamped & msg_Quaternion, geometry_msgs::TwistStamped & msg_Twist, sensor_msgs::NavSatFix & msg_Nav )
+{
+    //check integrity by CRC
+    if ( checkcrc( str_data_arr, str_len ) == 1 )
+    {
+ 
+        //data type 06
+        if ((int)str_data_arr[2] == 7)
+        {
+            msg_Quaternion.quaternion.x = ieee754decoding_32(str_data_arr, 13) ;
+            msg_Quaternion.quaternion.y = ieee754decoding_32(str_data_arr, 17) ;
+            msg_Quaternion.quaternion.z = ieee754decoding_32(str_data_arr, 21) ;
+            msg_Quaternion.quaternion.w = ieee754decoding_32(str_data_arr, 25) ;
+
+            
+        }
+
+      
+       
+        //data type 08
+        if ((int)str_data_arr[2] == 8)
+        {
+            msg_Twist.twist.linear.x = ieee754decoding_32(str_data_arr, 13);
+            msg_Twist.twist.linear.y = ieee754decoding_32(str_data_arr, 17);
+            msg_Twist.twist.linear.z = ieee754decoding_32(str_data_arr, 21);
+            msg_Nav.latitude = ieee754decoding_64(str_data_arr, 41);
+            msg_Nav.longitude  = ieee754decoding_64(str_data_arr, 49);
+            msg_Nav.altitude = ieee754decoding_64(str_data_arr, 57);
+        }
+    } 
 }
 
 
 
 
 int main (int argc, char** argv){
-    ros::init(argc, argv, "serial_example_node");
+    ros::init(argc, argv, "gps_data_pub");
     ros::NodeHandle nh;
+    ros::Publisher gps_Quaternion_pub = nh.advertise<geometry_msgs::QuaternionStamped>("Quaternion", 100);
+    ros::Publisher gps_Twist_pub = nh.advertise<geometry_msgs::TwistStamped>("Twist",100);
+    ros::Publisher gps_Nav_pub = nh.advertise<sensor_msgs::NavSatFix>("Nav",100);
 
-    ros::Subscriber write_sub = nh.subscribe("write", 1000, write_callback);
-    ros::Publisher read_pub = nh.advertise<std_msgs::String>("read", 1000);
+    geometry_msgs::QuaternionStamped msg_Quaternion;
+    geometry_msgs::TwistStamped msg_Twist;
+    sensor_msgs::NavSatFix msg_Nav;
+    msg_Quaternion.quaternion.x =0;
+    msg_Quaternion.quaternion.y =0;
+    msg_Quaternion.quaternion.w =0;
+    msg_Quaternion.quaternion.z =0;
+    msg_Twist.twist.linear.x =0;
+    msg_Twist.twist.linear.y =0;
+    msg_Twist.twist.linear.z =0;
+    msg_Twist.twist.angular.x =0;
+    msg_Twist.twist.angular.y =0;
+    msg_Twist.twist.angular.z =0;
+    msg_Nav.latitude =0;
+    msg_Nav.longitude =0;
+    msg_Nav.altitude =0;
+    serial::Serial ser;
 
-    std_msgs::String result;
-    int str_len = 0;
-    char c_arr[100];
-    std::string str_data;
-    unsigned char str_data_arr[100];
-    float roll, pitch, yaw, vel_n, vel_e, vel_d;
-    double latitude, longitude, altitude;
     try
     {
         ser.setPort("/dev/ttyUSB0");
@@ -254,28 +238,24 @@ int main (int argc, char** argv){
     else
         return -1;
 
-    ros::Rate loop_rate(1000);
+
+    ros::Rate loop_rate(500);
+    std::string str_data;
+    unsigned char str_data_arr[100];
+    int str_len = 0;
+
     while(ros::ok()){
+       
         ros::spinOnce();
         if(ser.available()){
             str_data = ser.readline(200, "3");
             str_len = str_data.length();
             memcpy(str_data_arr, str_data.c_str(), str_len+1);
             str_data_arr[str_len+1] = 0x00;
-            gpsdecoding(str_data_arr, roll, pitch, yaw, vel_n, vel_e, vel_d, latitude, longitude, altitude);
-            std::cout << "length   : " << str_len << std::endl;
-            std::cout << "Roll     : " << roll << std::endl;
-            std::cout << "Pitch    : " << pitch << std::endl;
-            std::cout << "Yaw      : " << yaw << std::endl;
-            std::cout << "Vel_N    : " << vel_n << std::endl;
-            std::cout << "Vel_E    : " << vel_e << std::endl;
-            std::cout << "Vel_D    : " << vel_d << std::endl;
-            std::cout << "latitude : " << latitude << std::endl;
-            std::cout << "longitude: " << longitude << std::endl;
-            std::cout << "altitude : " << altitude << std::endl;
-            std::cout << checkcrc(str_data_arr,str_len) << std::endl;
-            std::cout << str_len << std::endl;
-            read_pub.publish(result);
+            gpsdecoding(str_data_arr, str_len,msg_Quaternion, msg_Twist, msg_Nav);
+            gps_Quaternion_pub.publish(msg_Quaternion);
+            gps_Twist_pub.publish(msg_Twist);
+            gps_Nav_pub.publish(msg_Nav);
         }
         loop_rate.sleep();
 
